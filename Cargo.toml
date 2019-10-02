@@ -1,0 +1,19 @@
+[package]
+name = "shared-iter"
+version = "0.1.0"
+authors = ["Liam Perlaki <lperlaki@icloud.com>"]
+edition = "2018"
+repository = "https://github.com/lperlaki/shared-iter-rs"
+description = "Sharing"
+license = "MIT"
+readme = "./README.md"
+
+[lib]
+name="shared_iter"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+
+[dev-dependencies]
+rand="0.7.2"
