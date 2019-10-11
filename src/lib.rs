@@ -13,17 +13,19 @@
 
 use std::sync::{Arc, Mutex};
 
+use std::collections::HashMap;
+
 #[derive(Debug)]
 struct SharedIterCore<I: Iterator> {
-    iter: I,
-    buff: Vec<I::Item>,
+    iter: Mutex<I>,
+    buff: Mutex<HashMap<usize, (I::Item, usize)>>,
 }
 
 impl<I: Iterator> SharedIterCore<I> {
     fn new(iter: I) -> Self {
         Self {
-            iter,
-            buff: Vec::new(),
+            iter: Mutex::new(iter),
+            buff: Mutex::new(HashMap::with_capacity(8)),
         }
     }
 }
@@ -32,13 +34,18 @@ impl<I: Iterator> SharedIterCore<I>
 where
     I::Item: Copy,
 {
-    fn get(&mut self, index: usize) -> Option<I::Item> {
-        let val = self.buff.get(index);
-        if let Some(v) = val {
-            Some(*v)
+    fn get(this: &Arc<Self>, index: usize) -> Option<I::Item> {
+        let mut buff = this.buff.lock().unwrap();
+        if let Some(v) = buff.get_mut(&index) {
+            v.1 -= 1;
+            let val = v.0;
+            if v.1 == 0 {
+                buff.remove(&index);
+            }
+            Some(val)
         } else {
-            let r = self.iter.next()?;
-            self.buff.push(r);
+            let r = this.iter.lock().unwrap().next()?;
+            buff.insert(index, (r, Arc::strong_count(this) - 1));
             Some(r)
         }
     }
@@ -46,8 +53,21 @@ where
 
 /// # SharedIterator
 pub struct SharedIter<I: Iterator> {
-    core: Arc<Mutex<SharedIterCore<I>>>,
+    core: Arc<SharedIterCore<I>>,
     index: usize,
+}
+
+impl<I: Iterator> std::fmt::Debug for SharedIter<I>
+where
+    I: std::fmt::Debug,
+    I::Item: std::fmt::Debug,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SharedIter")
+            .field("core", &self.core)
+            .field("index", &self.index)
+            .finish()
+    }
 }
 
 impl<I: Iterator> Iterator for SharedIter<I>
@@ -56,8 +76,7 @@ where
 {
     type Item = I::Item;
     fn next(&mut self) -> Option<Self::Item> {
-        let mut core = self.core.lock().expect("Something went wrong");
-        let v = core.get(self.index);
+        let v = SharedIterCore::get(&self.core, self.index);
         self.index += 1;
         v
     }
@@ -67,7 +86,7 @@ impl<I: Iterator> Clone for SharedIter<I> {
     fn clone(&self) -> Self {
         Self {
             core: Arc::clone(&self.core),
-            index: 0,
+            index: self.index,
         }
     }
 }
@@ -80,7 +99,7 @@ pub trait ShareIterator: Iterator + Sized {
 impl<I: Iterator> ShareIterator for I {
     fn share(self) -> SharedIter<Self> {
         SharedIter {
-            core: Arc::new(Mutex::new(SharedIterCore::new(self))),
+            core: Arc::new(SharedIterCore::new(self)),
             index: 0,
         }
     }
