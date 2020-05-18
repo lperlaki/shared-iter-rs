@@ -120,14 +120,19 @@ mod test {
     }
 
     #[test]
-    fn test_rand() {
-        let iter = rand::thread_rng()
-            .sample_iter::<u8, _>(rand::distributions::Standard)
-            .share();
-        let iter2 = iter.clone();
-        assert_eq!(
-            iter.take(10).collect::<Vec<_>>(),
-            iter2.take(10).collect::<Vec<_>>()
-        );
+    fn test_multi_threaded() {
+        use std::thread;
+        let iter = (1..).share();
+        let threads = (0..5)
+            .map(|_| iter.clone())
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|liter| thread::spawn(move || liter.take(10).collect::<Vec<_>>()))
+            .collect::<Vec<_>>();
+
+        let r = iter.take(10).collect::<Vec<_>>();
+        for t in threads {
+            assert_eq!(t.join().unwrap(), r);
+        }
     }
 }
