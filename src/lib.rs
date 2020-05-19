@@ -11,62 +11,83 @@
 //! assert_eq!(iter1.take(10).collect::<Vec<_>>(), iter2.take(10).collect::<Vec<_>>());
 //! ```
 
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    mpsc::{channel, Receiver, SendError, Sender, TryRecvError},
+    Arc, Mutex,
+};
 
-use std::collections::HashMap;
-
+use slab::Slab;
 #[derive(Debug)]
 struct SharedIterCore<I: Iterator> {
-    iter: Mutex<I>,
-    buff: Mutex<HashMap<usize, (I::Item, usize)>>,
+    iter: I,
+    sender: Slab<Sender<I::Item>>,
 }
 
 impl<I: Iterator> SharedIterCore<I> {
     fn new(iter: I) -> Self {
         Self {
-            iter: Mutex::new(iter),
-            buff: Mutex::new(HashMap::with_capacity(8)),
+            iter,
+            sender: Slab::with_capacity(1),
         }
+    }
+
+    fn send(&mut self, val: I::Item) -> Result<(), SendError<I::Item>>
+    where
+        I::Item: Copy,
+    {
+        for (_, sender) in self.sender.iter() {
+            sender.send(val)?;
+        }
+        Ok(())
+    }
+
+    fn next(&mut self)
+    where
+        I::Item: Copy,
+    {
+        if let Some(val) = self.iter.next() {
+            self.send(val).expect("");
+        }
+    }
+
+    fn new_recv(&mut self) -> (usize, Receiver<I::Item>) {
+        let (sender, receiver) = channel();
+        let id = self.sender.insert(sender);
+        (id, receiver)
+    }
+
+    fn remove_recv(&mut self, id: usize) {
+        self.sender.remove(id);
     }
 }
 
-impl<I: Iterator> SharedIterCore<I>
-where
-    I::Item: Copy,
-{
-    fn get(this: &Arc<Self>, index: usize) -> Option<I::Item> {
-        let mut buff = this.buff.lock().unwrap();
-        if let Some(v) = buff.get_mut(&index) {
-            v.1 -= 1;
-            let val = v.0;
-            if v.1 == 0 {
-                buff.remove(&index);
-            }
-            Some(val)
-        } else {
-            let r = this.iter.lock().unwrap().next()?;
-            buff.insert(index, (r, Arc::strong_count(this) - 1));
-            Some(r)
-        }
-    }
-}
-
-/// # SharedIterator
+#[derive(Debug)]
 pub struct SharedIter<I: Iterator> {
-    core: Arc<SharedIterCore<I>>,
-    index: usize,
+    id: usize,
+    inner: Arc<Mutex<SharedIterCore<I>>>,
+    receiver: Receiver<I::Item>,
 }
 
-impl<I: Iterator> std::fmt::Debug for SharedIter<I>
-where
-    I: std::fmt::Debug,
-    I::Item: std::fmt::Debug,
-{
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SharedIter")
-            .field("core", &self.core)
-            .field("index", &self.index)
-            .finish()
+impl<I: Iterator> SharedIter<I> {
+    fn new(iter: I) -> Self {
+        let mut inner = SharedIterCore::new(iter);
+        let (id, receiver) = inner.new_recv();
+        Self {
+            id,
+            inner: Arc::new(Mutex::new(inner)),
+            receiver,
+        }
+    }
+}
+
+impl<I: Iterator> Clone for SharedIter<I> {
+    fn clone(&self) -> Self {
+        let (id, receiver) = self.inner.lock().unwrap().new_recv();
+        Self {
+            inner: self.inner.clone(),
+            receiver,
+            id,
+        }
     }
 }
 
@@ -75,19 +96,22 @@ where
     I::Item: Copy,
 {
     type Item = I::Item;
-    fn next(&mut self) -> Option<Self::Item> {
-        let v = SharedIterCore::get(&self.core, self.index);
-        self.index += 1;
-        v
+
+    fn next(&mut self) -> Option<I::Item> {
+        match self.receiver.try_recv() {
+            Ok(val) => Some(val),
+            Err(TryRecvError::Disconnected) => None,
+            Err(TryRecvError::Empty) => {
+                self.inner.lock().unwrap().next();
+                self.receiver.try_recv().ok()
+            }
+        }
     }
 }
 
-impl<I: Iterator> Clone for SharedIter<I> {
-    fn clone(&self) -> Self {
-        Self {
-            core: Arc::clone(&self.core),
-            index: self.index,
-        }
+impl<I: Iterator> Drop for SharedIter<I> {
+    fn drop(&mut self) {
+        self.inner.lock().unwrap().remove_recv(self.id);
     }
 }
 
@@ -98,17 +122,19 @@ pub trait ShareIterator: Iterator + Sized {
 
 impl<I: Iterator> ShareIterator for I {
     fn share(self) -> SharedIter<Self> {
-        SharedIter {
-            core: Arc::new(SharedIterCore::new(self)),
-            index: 0,
-        }
+        SharedIter::new(self)
     }
 }
+
+// impl<I: Iterator> ShareIterator for SharedIter<I> {
+//     fn share(self) -> SharedIter<Self> {
+//        self
+//     }
+// }
 
 #[cfg(test)]
 mod test {
     use super::*;
-    use rand::Rng;
     #[test]
     fn test_iter() {
         let iter = (1..20).share();
